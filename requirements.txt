@@ -1,0 +1,25 @@
+# FALCON Requirements
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+torch>=2.0.0
+torch-geometric>=2.3.0
+sentence-transformers>=2.2.0
+networkx>=3.0
+numpy>=1.24.0
+
+# Utilities
+tqdm>=4.65.0
+scikit-learn>=1.2.0
+
+# Optional (for GPU support)
+# torch-scatter
+# torch-sparse
+# torch-cluster
+# torch-spline-conv
+
+# Development
+# pytest>=7.3.0
+# black>=23.0.0
+# flake8>=6.0.0
+
