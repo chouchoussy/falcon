@@ -11,6 +11,7 @@ from torch_geometric.nn import global_mean_pool
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import json
+import gc
 from tqdm import tqdm
 
 from .losses import NodeContrastiveLoss, GraphContrastiveLoss, ListwiseLoss, CombinedPhaseLoss
@@ -180,12 +181,9 @@ class FALCONTrainer:
                 
                 optimizer.zero_grad()
                 
-                # Move to GPU only for forward pass
-                g_f_gpu = g_f.to(self.device)
-                g_f_aug_gpu = g_f_aug.to(self.device)
-                g_p_gpu = g_p.to(self.device)
-                
+                # Process each graph separately with explicit cleanup
                 # Forward pass for fail graph
+                g_f_gpu = g_f.to(self.device)
                 outputs_f = self.model(
                     g_f_gpu.x, g_f_gpu.edge_index,
                     return_projection=True,
@@ -193,8 +191,13 @@ class FALCONTrainer:
                 )
                 node_emb_f = outputs_f['node_emb']
                 proj_emb_f = outputs_f['proj_emb']
+                graph_emb_f = self._get_graph_embedding(proj_emb_f)
+                del g_f_gpu, outputs_f
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
                 
                 # Forward pass for augmented fail graph
+                g_f_aug_gpu = g_f_aug.to(self.device)
                 outputs_f_aug = self.model(
                     g_f_aug_gpu.x, g_f_aug_gpu.edge_index,
                     return_projection=True,
@@ -202,8 +205,13 @@ class FALCONTrainer:
                 )
                 node_emb_f_aug = outputs_f_aug['node_emb']
                 proj_emb_f_aug = outputs_f_aug['proj_emb']
+                graph_emb_f_aug = self._get_graph_embedding(proj_emb_f_aug)
+                del g_f_aug_gpu, outputs_f_aug
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
                 
                 # Forward pass for pass graph
+                g_p_gpu = g_p.to(self.device)
                 outputs_p = self.model(
                     g_p_gpu.x, g_p_gpu.edge_index,
                     return_projection=True,
@@ -211,11 +219,10 @@ class FALCONTrainer:
                 )
                 node_emb_p = outputs_p['node_emb']
                 proj_emb_p = outputs_p['proj_emb']
-                
-                # Get graph-level embeddings (pooling)
-                graph_emb_f = self._get_graph_embedding(proj_emb_f)
-                graph_emb_f_aug = self._get_graph_embedding(proj_emb_f_aug)
                 graph_emb_p = self._get_graph_embedding(proj_emb_p)
+                del g_p_gpu, outputs_p
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
                 
                 # Compute combined loss
                 # Node embeddings should have same size (use min size if different)
@@ -238,17 +245,19 @@ class FALCONTrainer:
                 total_loss.backward()
                 optimizer.step()
                 
-                # Delete all GPU tensors (graphs are already on CPU, these are just GPU copies)
-                del g_f_gpu, g_f_aug_gpu, g_p_gpu
-                del outputs_f, outputs_f_aug, outputs_p
+                # Delete all remaining GPU tensors
                 del node_emb_f, node_emb_f_aug, node_emb_p
                 del proj_emb_f, proj_emb_f_aug, proj_emb_p
                 del graph_emb_f, graph_emb_f_aug, graph_emb_p
                 del total_loss, node_loss, graph_loss
                 
-                # Clear cache to free memory
+                # Force synchronization and clear cache
                 if self.device == 'cuda':
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                
+                # Python garbage collection
+                gc.collect()
                 
                 # Record losses
                 epoch_losses.append(loss_val)
@@ -262,9 +271,11 @@ class FALCONTrainer:
                         'graph': f"{graph_loss_val:.4f}"
                     })
                 
-                # Periodic memory cleanup every 5 iterations
-                if (i + 1) % 5 == 0 and self.device == 'cuda':
+                # Periodic memory cleanup every 3 iterations (more frequent)
+                if (i + 1) % 3 == 0 and self.device == 'cuda':
+                    torch.cuda.synchronize()
                     torch.cuda.empty_cache()
+                    gc.collect()
             
             # Epoch summary
             avg_loss = sum(epoch_losses) / len(epoch_losses)

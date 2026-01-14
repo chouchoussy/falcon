@@ -11,6 +11,7 @@ Usage:
 """
 
 import sys
+import os
 import json
 import torch
 import gc
@@ -20,6 +21,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple
 from torch_geometric.data import Data
+
+# Set CUDA memory allocation config to reduce fragmentation
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 from src import config
 from src.models import FALCONModel
