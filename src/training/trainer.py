@@ -45,7 +45,9 @@ class FALCONTrainer:
         temperature: float = 0.07,
         margin: float = 1.0,
         augment_fn=None,
-        freeze_encoder_phase2: bool = False
+        freeze_encoder_phase2: bool = False,
+        node_loss_chunk_size: int = 5000,
+        node_loss_max_nodes: int = 50000
     ):
         """
         Initialize FALCON Trainer.
@@ -62,6 +64,8 @@ class FALCONTrainer:
             margin: Margin for triplet loss
             augment_fn: Function to augment graphs (from dataset module)
             freeze_encoder_phase2: Whether to freeze encoder in Phase 2
+            node_loss_chunk_size: Chunk size for node contrastive loss (memory optimization)
+            node_loss_max_nodes: Max nodes for node contrastive loss (will sample if exceeded)
         """
         self.model = model.to(device)
         self.device = device
@@ -71,12 +75,14 @@ class FALCONTrainer:
         self.weight_decay = weight_decay
         self.freeze_encoder_phase2 = freeze_encoder_phase2
         
-        # Loss functions
+        # Loss functions with memory optimization
         self.combined_loss = CombinedPhaseLoss(
             node_weight=node_loss_weight,
             graph_weight=graph_loss_weight,
             temperature=temperature,
-            margin=margin
+            margin=margin,
+            node_loss_chunk_size=node_loss_chunk_size,
+            node_loss_max_nodes=node_loss_max_nodes
         )
         
         self.listwise_loss = ListwiseLoss()
@@ -223,6 +229,16 @@ class FALCONTrainer:
                 total_loss.backward()
                 optimizer.step()
                 
+                # Clear cache to free memory
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                # Delete intermediate tensors to free memory
+                del outputs_f, outputs_f_aug, outputs_p
+                del node_emb_f, node_emb_f_aug, node_emb_p
+                del proj_emb_f, proj_emb_f_aug, proj_emb_p
+                del graph_emb_f, graph_emb_f_aug, graph_emb_p
+                
                 # Record losses
                 epoch_losses.append(total_loss.item())
                 epoch_node_losses.append(node_loss.item())
@@ -337,6 +353,13 @@ class FALCONTrainer:
                     optimizer.step()
                     
                     epoch_losses.append(loss.item())
+                
+                # Clear cache to free memory
+                if self.device == 'cuda':
+                    torch.cuda.empty_cache()
+                
+                # Delete intermediate tensors
+                del outputs, rank_scores
                 
                 if verbose and isinstance(iterator, tqdm):
                     if epoch_losses:

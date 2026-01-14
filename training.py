@@ -178,7 +178,9 @@ def create_trainer(model, args) -> FALCONTrainer:
         temperature=config.TEMPERATURE,
         margin=config.MARGIN,
         augment_fn=augment_graph,
-        freeze_encoder_phase2=config.FREEZE_ENCODER_PHASE2
+        freeze_encoder_phase2=config.FREEZE_ENCODER_PHASE2,
+        node_loss_chunk_size=config.NODE_LOSS_CHUNK_SIZE,
+        node_loss_max_nodes=config.NODE_LOSS_MAX_NODES
     )
 
 

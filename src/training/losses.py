@@ -21,17 +21,23 @@ class NodeContrastiveLoss(nn.Module):
         L_node = -log( exp(sim(z_i, z'_i) / τ) / Σ_k exp(sim(z_i, z'_k) / τ) )
     
     where z_i and z'_i are projected embeddings of node i in two views.
+    
+    Memory-optimized: Uses chunked computation to avoid OOM for large graphs.
     """
     
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.07, chunk_size: int = 5000, max_nodes: int = 50000):
         """
         Initialize Node Contrastive Loss.
         
         Args:
             temperature: Temperature parameter (τ) for softmax scaling
+            chunk_size: Chunk size for memory-efficient computation (default: 5000)
+            max_nodes: Maximum nodes to process (if exceeded, will sample)
         """
         super(NodeContrastiveLoss, self).__init__()
         self.temperature = temperature
+        self.chunk_size = chunk_size
+        self.max_nodes = max_nodes
     
     def forward(
         self,
@@ -40,7 +46,7 @@ class NodeContrastiveLoss(nn.Module):
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Compute node-level contrastive loss.
+        Compute node-level contrastive loss (memory-optimized).
         
         Args:
             z1: Projected embeddings from view 1 [num_nodes, embed_dim]
@@ -65,21 +71,38 @@ class NodeContrastiveLoss(nn.Module):
         if num_nodes == 0:
             return torch.tensor(0.0, device=z1.device)
         
-        # Compute similarity matrix: [num_nodes, num_nodes]
-        # sim[i,j] = cosine_similarity(z1[i], z2[j])
-        similarity_matrix = torch.matmul(z1, z2.t()) / self.temperature
+        # If graph is too large, sample nodes to avoid OOM
+        if num_nodes > self.max_nodes:
+            indices = torch.randperm(num_nodes, device=z1.device)[:self.max_nodes]
+            z1 = z1[indices]
+            z2 = z2[indices]
+            num_nodes = self.max_nodes
         
-        # For each node i in z1, the positive is z2[i]
-        # Diagonal elements are positives
-        positives = torch.diag(similarity_matrix)
+        # Memory-efficient computation: process in chunks
+        # Instead of creating full [N, N] matrix, compute loss row by row
+        losses = []
         
-        # For each row, we have one positive (diagonal) and (num_nodes-1) negatives
-        # InfoNCE: -log(exp(pos) / sum(exp(all)))
+        for i in range(0, num_nodes, self.chunk_size):
+            end_idx = min(i + self.chunk_size, num_nodes)
+            z1_chunk = z1[i:end_idx]  # [chunk_size, embed_dim]
+            z2_chunk = z2[i:end_idx]  # [chunk_size, embed_dim] - corresponding nodes
+            
+            # Compute similarities for this chunk: [chunk_size, num_nodes]
+            # Need full similarities for logsumexp
+            similarities = torch.matmul(z1_chunk, z2.t()) / self.temperature
+            
+            # Positive pairs are diagonal elements (z1[i] with z2[i])
+            # Get positive similarity: dot product of corresponding nodes
+            positives = (z1_chunk * z2_chunk).sum(dim=1) / self.temperature
+            
+            # Log-sum-exp for each row
+            chunk_losses = -positives + torch.logsumexp(similarities, dim=1)
+            losses.append(chunk_losses)
         
-        # Log-sum-exp trick for numerical stability
-        loss = -positives + torch.logsumexp(similarity_matrix, dim=1)
+        # Concatenate and average
+        loss = torch.cat(losses).mean()
         
-        return loss.mean()
+        return loss
 
 
 class GraphContrastiveLoss(nn.Module):
@@ -233,7 +256,9 @@ class CombinedPhaseLoss(nn.Module):
         node_weight: float = 1.0,
         graph_weight: float = 0.5,
         temperature: float = 0.07,
-        margin: float = 1.0
+        margin: float = 1.0,
+        node_loss_chunk_size: int = 5000,
+        node_loss_max_nodes: int = 50000
     ):
         """
         Initialize Combined Phase 1 Loss.
@@ -243,13 +268,19 @@ class CombinedPhaseLoss(nn.Module):
             graph_weight: Weight for graph-level contrastive loss
             temperature: Temperature for node contrastive loss
             margin: Margin for graph triplet loss
+            node_loss_chunk_size: Chunk size for node contrastive loss (memory optimization)
+            node_loss_max_nodes: Max nodes for node contrastive loss (will sample if exceeded)
         """
         super(CombinedPhaseLoss, self).__init__()
         
         self.node_weight = node_weight
         self.graph_weight = graph_weight
         
-        self.node_contrastive = NodeContrastiveLoss(temperature=temperature)
+        self.node_contrastive = NodeContrastiveLoss(
+            temperature=temperature,
+            chunk_size=node_loss_chunk_size,
+            max_nodes=node_loss_max_nodes
+        )
         self.graph_contrastive = GraphContrastiveLoss(margin=margin)
     
     def forward(

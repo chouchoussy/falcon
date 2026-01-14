@@ -61,6 +61,10 @@ FREEZE_ENCODER_PHASE2 = False
 WEIGHT_DECAY = 1e-5
 BATCH_SIZE = 1  # Process one graph at a time
 
+# Memory Optimization (for large graphs)
+NODE_LOSS_CHUNK_SIZE = 5000  # Chunk size for node contrastive loss computation
+NODE_LOSS_MAX_NODES = 50000  # Max nodes to process (will sample if exceeded)
+
 # ============================================================================
 # DEVICE CONFIGURATION
 # ============================================================================
