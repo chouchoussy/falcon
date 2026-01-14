@@ -171,19 +171,23 @@ class FALCONTrainer:
             iterator = tqdm(range(len(fail_graphs)), desc=f"Epoch {epoch+1}/{epochs}") if verbose else range(len(fail_graphs))
             
             for i in iterator:
-                # Get a fail graph and a pass graph
-                g_f = fail_graphs[i].to(self.device)
-                g_p = pass_graphs[i % len(pass_graphs)].to(self.device)  # Cycle through pass graphs
+                # Get a fail graph and a pass graph (keep on CPU, move to GPU only when needed)
+                g_f = fail_graphs[i]  # Keep on CPU
+                g_p = pass_graphs[i % len(pass_graphs)]  # Keep on CPU
                 
-                # Create augmented fail graph
+                # Create augmented fail graph (on CPU)
                 g_f_aug = self.augment_fn(g_f, drop_prob=drop_prob)
-                g_f_aug = g_f_aug.to(self.device)
                 
                 optimizer.zero_grad()
                 
+                # Move to GPU only for forward pass
+                g_f_gpu = g_f.to(self.device)
+                g_f_aug_gpu = g_f_aug.to(self.device)
+                g_p_gpu = g_p.to(self.device)
+                
                 # Forward pass for fail graph
                 outputs_f = self.model(
-                    g_f.x, g_f.edge_index,
+                    g_f_gpu.x, g_f_gpu.edge_index,
                     return_projection=True,
                     return_rank=False
                 )
@@ -192,7 +196,7 @@ class FALCONTrainer:
                 
                 # Forward pass for augmented fail graph
                 outputs_f_aug = self.model(
-                    g_f_aug.x, g_f_aug.edge_index,
+                    g_f_aug_gpu.x, g_f_aug_gpu.edge_index,
                     return_projection=True,
                     return_rank=False
                 )
@@ -201,7 +205,7 @@ class FALCONTrainer:
                 
                 # Forward pass for pass graph
                 outputs_p = self.model(
-                    g_p.x, g_p.edge_index,
+                    g_p_gpu.x, g_p_gpu.edge_index,
                     return_projection=True,
                     return_rank=False
                 )
@@ -225,31 +229,42 @@ class FALCONTrainer:
                     graph_emb_p
                 )
                 
+                # Record losses BEFORE backward (to avoid keeping graph in memory)
+                loss_val = total_loss.item()
+                node_loss_val = node_loss.item()
+                graph_loss_val = graph_loss.item()
+                
                 # Backward and optimize
                 total_loss.backward()
                 optimizer.step()
+                
+                # Delete all GPU tensors (graphs are already on CPU, these are just GPU copies)
+                del g_f_gpu, g_f_aug_gpu, g_p_gpu
+                del outputs_f, outputs_f_aug, outputs_p
+                del node_emb_f, node_emb_f_aug, node_emb_p
+                del proj_emb_f, proj_emb_f_aug, proj_emb_p
+                del graph_emb_f, graph_emb_f_aug, graph_emb_p
+                del total_loss, node_loss, graph_loss
                 
                 # Clear cache to free memory
                 if self.device == 'cuda':
                     torch.cuda.empty_cache()
                 
-                # Delete intermediate tensors to free memory
-                del outputs_f, outputs_f_aug, outputs_p
-                del node_emb_f, node_emb_f_aug, node_emb_p
-                del proj_emb_f, proj_emb_f_aug, proj_emb_p
-                del graph_emb_f, graph_emb_f_aug, graph_emb_p
-                
                 # Record losses
-                epoch_losses.append(total_loss.item())
-                epoch_node_losses.append(node_loss.item())
-                epoch_graph_losses.append(graph_loss.item())
+                epoch_losses.append(loss_val)
+                epoch_node_losses.append(node_loss_val)
+                epoch_graph_losses.append(graph_loss_val)
                 
                 if verbose and isinstance(iterator, tqdm):
                     iterator.set_postfix({
-                        'loss': f"{total_loss.item():.4f}",
-                        'node': f"{node_loss.item():.4f}",
-                        'graph': f"{graph_loss.item():.4f}"
+                        'loss': f"{loss_val:.4f}",
+                        'node': f"{node_loss_val:.4f}",
+                        'graph': f"{graph_loss_val:.4f}"
                     })
+                
+                # Periodic memory cleanup every 5 iterations
+                if (i + 1) % 5 == 0 and self.device == 'cuda':
+                    torch.cuda.empty_cache()
             
             # Epoch summary
             avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -328,17 +343,18 @@ class FALCONTrainer:
             iterator = tqdm(fail_graphs, desc=f"Epoch {epoch+1}/{epochs}") if verbose else fail_graphs
             
             for g_f in iterator:
-                g_f = g_f.to(self.device)
-                
-                # Check if graph has labels
+                # Keep graph on CPU, move to GPU only when needed
                 if not hasattr(g_f, 'y') or g_f.y is None:
                     continue
                 
                 optimizer.zero_grad()
                 
+                # Move to GPU only for forward pass
+                g_f_gpu = g_f.to(self.device)
+                
                 # Forward pass
                 outputs = self.model(
-                    g_f.x, g_f.edge_index,
+                    g_f_gpu.x, g_f_gpu.edge_index,
                     return_projection=False,
                     return_rank=True
                 )
@@ -346,20 +362,21 @@ class FALCONTrainer:
                 rank_scores = outputs['rank_score']
                 
                 # Compute listwise ranking loss
-                loss = self.listwise_loss(rank_scores, g_f.y)
+                loss = self.listwise_loss(rank_scores, g_f_gpu.y)
                 
-                if loss.item() > 0:  # Only backprop if loss is valid
+                loss_val = loss.item() if loss.item() > 0 else None
+                
+                if loss_val is not None and loss_val > 0:  # Only backprop if loss is valid
                     loss.backward()
                     optimizer.step()
-                    
-                    epoch_losses.append(loss.item())
+                    epoch_losses.append(loss_val)
+                
+                # Delete all GPU tensors (graph is already on CPU, this is just GPU copy)
+                del g_f_gpu, outputs, rank_scores, loss
                 
                 # Clear cache to free memory
                 if self.device == 'cuda':
                     torch.cuda.empty_cache()
-                
-                # Delete intermediate tensors
-                del outputs, rank_scores
                 
                 if verbose and isinstance(iterator, tqdm):
                     if epoch_losses:

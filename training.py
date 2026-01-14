@@ -283,9 +283,9 @@ def main():
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Load preprocessed graphs
+    # Load preprocessed graphs (always on CPU to save GPU memory)
     print("\n[Loading Preprocessed Graphs]")
-    graphs = load_processed_graphs(args.data_path, device=args.device, verbose=args.verbose)
+    graphs = load_processed_graphs(args.data_path, device='cpu', verbose=args.verbose)
     
     if len(graphs) == 0:
         print("\nError: No valid graphs loaded.")
