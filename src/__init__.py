@@ -8,14 +8,12 @@ __author__ = "FALCON Team"
 
 # Make src a proper package
 from . import config
-from . import dataset
 from . import models
 from . import training
 from . import utils
 
 __all__ = [
     'config',
-    'dataset',
     'models',
     'training',
     'utils',

@@ -13,6 +13,11 @@ from .losses import (
 
 from .trainer import FALCONTrainer
 
+from .augmentation import (
+    augment_graph,
+    augment_graph_pair
+)
+
 __all__ = [
     # Loss Functions
     'NodeContrastiveLoss',
@@ -23,5 +28,9 @@ __all__ = [
     
     # Trainer
     'FALCONTrainer',
+    
+    # Augmentation
+    'augment_graph',
+    'augment_graph_pair',
 ]
 

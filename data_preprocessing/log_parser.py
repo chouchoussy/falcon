@@ -1,6 +1,16 @@
 """
 Log Parser module for FALCON.
 Parses execution trace log files to extract function call events.
+
+Key Features:
+- Extracts function calls with filename, function name, and thread ID
+- Supports multi-threaded logs: [Thread-123] Call func_name ...
+- Handles single-threaded logs (defaults to "main" thread)
+
+Thread Handling (Critical for FALCON):
+As per FALCON paper, sequential edges should ONLY connect methods
+within the same thread. This parser extracts thread IDs to ensure
+correct intra-thread execution sequence reconstruction.
 """
 
 import re
@@ -44,7 +54,11 @@ def parse_log_file(filepath: str) -> List[LogEvent]:
     """
     # Regex pattern to extract function name and filename
     # Pattern: Call <func_name> ... (filename.ext:line_number)
-    pattern = r'Call\s+([^\s]+)\s+.*?\(([\w\-\.]+):\d+\)'
+    # Pattern supports optional thread ID: [Thread-123] Call func_name ...
+    # Group 1: Thread ID (optional)
+    # Group 2: Function name
+    # Group 3: Filename
+    pattern = r'(?:\[([^\]]+)\])?\s*Call\s+([^\s]+)\s+.*?\(([\w\-\.]+):\d+\)'
     
     events = []
     
@@ -57,11 +71,10 @@ def parse_log_file(filepath: str) -> List[LogEvent]:
                 
                 match = re.search(pattern, line)
                 if match:
-                    func_name = match.group(1)
-                    filename = match.group(2)
-                    
-                    # Extract thread_id if available (can be extended)
-                    thread_id = "main"  # Default thread
+                    # Extract thread ID (if present in log), function name, and filename
+                    thread_id = match.group(1) if match.group(1) else "main"
+                    func_name = match.group(2)
+                    filename = match.group(3)
                     
                     event = LogEvent(
                         filename=filename,

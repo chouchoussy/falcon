@@ -163,7 +163,10 @@ class GraphBuilder:
             edges.append([pkg_node, file_node])
             edges.append([file_node, method_node])
             
-            # Sequential edges: Method_i -> Method_{i+1} (same thread)
+            # Sequential edges: Method_i -> Method_{i+1} (ONLY within same thread)
+            # CRITICAL: As per FALCON paper, we connect method nodes according to
+            # "the order of their execution within threads" (not across threads)
+            # This prevents creating fake edges between unrelated thread contexts
             thread_id = event.thread_id
             if thread_id in previous_method_by_thread:
                 prev_method = previous_method_by_thread[thread_id]
@@ -272,7 +275,9 @@ class GraphBuilder:
             if cache_path.exists() and save_processed:
                 # Load from cache
                 try:
-                    data = torch.load(cache_path)
+                    # PyTorch 2.6+ requires weights_only=False for custom objects
+                    # Always use map_location='cpu' for preprocessing (portable files)
+                    data = torch.load(cache_path, map_location='cpu', weights_only=False)
                     graphs[test_id] = data
                     continue
                 except Exception as e:
