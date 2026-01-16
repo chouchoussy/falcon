@@ -207,6 +207,10 @@ def load_train_test_data(data_path: str, device: str = 'cpu', verbose: bool = Tr
 
 def find_bug_rank(scores: torch.Tensor, labels: torch.Tensor) -> int:
     """Find the rank of the first faulty node."""
+    # Move both tensors to CPU to avoid device mismatch issues
+    scores = scores.cpu()
+    labels = labels.cpu()
+    
     faulty_indices = (labels == 1).nonzero(as_tuple=True)[0]
     
     if len(faulty_indices) == 0:
