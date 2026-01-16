@@ -4,10 +4,12 @@ FALCON Training Script.
 Trains the model using preprocessed graphs from processed_data/.
 
 Usage:
-    python training.py                        # Default: 80/20 train/test split
-    python training.py --train_ratio 0.7     # 70% train, 30% test
+    python training.py                        # Load from processed_data/train/ and processed_data/test/
     python training.py --epochs1 5 --epochs2 5  # Custom epochs
-    python training.py --seed 123            # Different random seed
+    python training.py --data_path ./custom_data  # Custom data path
+    
+Note: Data is loaded directly from train/ and test/ folders.
+      No automatic train/test splitting is performed.
 """
 
 import sys
@@ -50,18 +52,19 @@ def parse_args():
         help='Path to save results'
     )
     
-    # Train/Test split
+    # Note: train_ratio and seed are kept for backward compatibility but not used
+    # Data is loaded directly from train/ and test/ folders
     parser.add_argument(
         '--train_ratio',
         type=float,
         default=0.8,
-        help='Ratio of data for training (default: 0.8 = 80%%)'
+        help='[DEPRECATED] Not used - data loaded from train/ and test/ folders'
     )
     parser.add_argument(
         '--seed',
         type=int,
         default=42,
-        help='Random seed for reproducibility'
+        help='[DEPRECATED] Not used - data loaded from train/ and test/ folders'
     )
     
     # Training hyperparameters
@@ -82,57 +85,124 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_processed_graphs(data_path: str, device: str = 'cpu', verbose: bool = True) -> List[Data]:
+def load_graphs_from_folder(folder_path: Path, device: str = 'cpu', verbose: bool = True) -> Tuple[List[Data], List[Data]]:
     """
-    Load preprocessed graphs from .pt files.
+    Load graphs from a specific folder, separating fail and pass graphs.
     
     Args:
-        data_path: Path to directory containing .pt files
+        folder_path: Path to folder containing .pt files
         device: Device to load tensors to ('cuda' or 'cpu')
         verbose: Whether to print progress
     
     Returns:
-        List of Data objects
+        Tuple of (fail_graphs, pass_graphs) - both are lists of Data objects
     """
-    data_dir = Path(data_path)
+    if not folder_path.exists():
+        if verbose:
+            print(f"  Warning: Folder not found: {folder_path}")
+        return [], []
     
-    if not data_dir.exists():
-        print(f"Error: Data directory not found: {data_dir}")
-        print("Please run preprocessing first: python preprocess.py")
-        return []
+    # Find all .pt files
+    pt_files = sorted(folder_path.glob("*.pt"))
     
-    # Find all .pt files (version files start with 'v')
-    pt_files = sorted(data_dir.glob("v*.pt"))
+    if verbose and len(pt_files) > 0:
+        print(f"  Loading from {folder_path.name}: {len(pt_files)} files")
     
-    if verbose:
-        print(f"Found {len(pt_files)} preprocessed graphs")
-    
-    graphs = []
+    fail_graphs = []
+    pass_graphs = []
     skipped = 0
     
     for pt_file in pt_files:
         try:
             # PyTorch 2.6+ requires weights_only=False for custom objects
-            # map_location allows loading CUDA tensors on CPU or vice versa
             data = torch.load(pt_file, map_location=device, weights_only=False)
             
             # Store version name if not present
             if not hasattr(data, 'version_name'):
                 data.version_name = pt_file.stem
             
-            # Only include graphs with faulty nodes
-            if hasattr(data, 'y') and data.y.sum() > 0:
-                graphs.append(data)
+            # Determine if this is a fail or pass graph based on filename
+            filename = pt_file.stem.lower()
+            
+            if '_fail' in filename:
+                # Fail graph: must have faulty nodes
+                if hasattr(data, 'y') and data.y.sum() > 0:
+                    fail_graphs.append(data)
+                else:
+                    skipped += 1
+                    if verbose:
+                        print(f"    Skipped {pt_file.name}: marked as fail but no faulty nodes")
+            elif '_pass' in filename:
+                # Pass graph: used for contrastive learning
+                pass_graphs.append(data)
             else:
-                skipped += 1
+                # Legacy format: check if has faulty nodes
+                if hasattr(data, 'y') and data.y.sum() > 0:
+                    fail_graphs.append(data)
+                else:
+                    skipped += 1
+                    if verbose:
+                        print(f"    Skipped {pt_file.name}: no _fail/_pass suffix and no faulty nodes")
                     
         except Exception as e:
-            print(f"  Error loading {pt_file.stem}: {e}")
+            print(f"    Error loading {pt_file.name}: {e}")
     
     if verbose:
-        print(f"Loaded {len(graphs)} valid graphs (skipped {skipped} without faulty nodes)")
+        print(f"    Loaded {len(fail_graphs)} fail graphs and {len(pass_graphs)} pass graphs")
+        if skipped > 0:
+            print(f"    Skipped {skipped} invalid graphs")
     
-    return graphs
+    return fail_graphs, pass_graphs
+
+
+def load_train_test_data(data_path: str, device: str = 'cpu', verbose: bool = True) -> Tuple[List[Data], List[Data], List[Data]]:
+    """
+    Load preprocessed graphs from train/ and test/ folders.
+    
+    Args:
+        data_path: Path to directory containing train/ and test/ folders
+        device: Device to load tensors to ('cuda' or 'cpu')
+        verbose: Whether to print progress
+    
+    Returns:
+        Tuple of (train_fail_graphs, train_pass_graphs, test_fail_graphs)
+    """
+    data_dir = Path(data_path)
+    
+    if not data_dir.exists():
+        print(f"Error: Data directory not found: {data_dir}")
+        print("Please run preprocessing first: python preprocess.py")
+        return [], [], []
+    
+    train_dir = data_dir / 'train'
+    test_dir = data_dir / 'test'
+    
+    if verbose:
+        print(f"Data directory: {data_dir}")
+        print(f"Train directory: {train_dir}")
+        print(f"Test directory: {test_dir}")
+    
+    # Load from train folder
+    if verbose:
+        print("\n[Loading Train Data]")
+    train_fail_graphs, train_pass_graphs = load_graphs_from_folder(train_dir, device, verbose)
+    
+    # Load from test folder (only fail graphs for evaluation)
+    if verbose:
+        print("\n[Loading Test Data]")
+    test_fail_graphs, test_pass_graphs = load_graphs_from_folder(test_dir, device, verbose)
+    
+    # Warn if test has pass graphs (not used for evaluation)
+    if len(test_pass_graphs) > 0 and verbose:
+        print(f"  Note: Found {len(test_pass_graphs)} pass graphs in test folder (not used for evaluation)")
+    
+    if verbose:
+        print(f"\n[Summary]")
+        print(f"  Train fail graphs: {len(train_fail_graphs)}")
+        print(f"  Train pass graphs: {len(train_pass_graphs)}")
+        print(f"  Test fail graphs: {len(test_fail_graphs)}")
+    
+    return train_fail_graphs, train_pass_graphs, test_fail_graphs
 
 
 def find_bug_rank(scores: torch.Tensor, labels: torch.Tensor) -> int:
@@ -189,12 +259,19 @@ def create_trainer(model, args) -> FALCONTrainer:
 
 
 def train_and_evaluate(
-    train_graphs: List[Data],
-    test_graphs: List[Data],
+    train_fail_graphs: List[Data],
+    train_pass_graphs: List[Data],
+    test_fail_graphs: List[Data],
     args
 ) -> Tuple[List[int], List[str]]:
     """
     Train model and evaluate on test set.
+    
+    Args:
+        train_fail_graphs: Training fail graphs (for Phase 1 & Phase 2)
+        train_pass_graphs: Training pass graphs (for Phase 1 contrastive learning)
+        test_fail_graphs: Test fail graphs (for evaluation)
+        args: Training arguments
     
     Returns:
         Tuple of (rank_list, version_names)
@@ -212,8 +289,8 @@ def train_and_evaluate(
         print(f"{'='*70}")
         
         trainer.train_phase1_representation(
-            fail_graphs=train_graphs,
-            pass_graphs=train_graphs,
+            fail_graphs=train_fail_graphs,
+            pass_graphs=train_pass_graphs,
             epochs=args.epochs1,
             drop_prob=args.drop_prob,
             verbose=args.verbose
@@ -225,20 +302,20 @@ def train_and_evaluate(
         print(f"{'='*70}")
         
         trainer.train_phase2_ranking(
-            fail_graphs=train_graphs,
+            fail_graphs=train_fail_graphs,
             epochs=args.epochs2,
             verbose=args.verbose
         )
         
         # Evaluation
         print(f"\n{'='*70}")
-        print(f"EVALUATION ({len(test_graphs)} test graphs)")
+        print(f"EVALUATION ({len(test_fail_graphs)} test graphs)")
         print(f"{'='*70}")
         
         total_ranks = []
         version_names = []
         
-        for i, test_graph in enumerate(test_graphs):
+        for i, test_graph in enumerate(test_fail_graphs):
             test_version = test_graph.version_name if hasattr(test_graph, 'version_name') else f"test_{i}"
             
             # Predict
@@ -252,7 +329,7 @@ def train_and_evaluate(
             else:
                 status = "Not found"
             
-            print(f"  [{i+1:2}/{len(test_graphs)}] {test_version}: {status}")
+            print(f"  [{i+1:2}/{len(test_fail_graphs)}] {test_version}: {status}")
         
         return total_ranks, version_names
         
@@ -277,8 +354,6 @@ def main():
     print(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Data Path: {args.data_path}")
     print(f"Device: {args.device}")
-    print(f"Train Ratio: {args.train_ratio*100:.0f}%")
-    print(f"Random Seed: {args.seed}")
     print(f"Phase 1 Epochs: {args.epochs1}")
     print(f"Phase 2 Epochs: {args.epochs2}")
     print("=" * 70)
@@ -287,34 +362,41 @@ def main():
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Load preprocessed graphs (always on CPU to save GPU memory)
-    print("\n[Loading Preprocessed Graphs]")
-    graphs = load_processed_graphs(args.data_path, device='cpu', verbose=args.verbose)
+    # Load preprocessed graphs from train/ and test/ folders (always on CPU to save GPU memory)
+    print("\n[Loading Preprocessed Graphs from train/ and test/ folders]")
+    train_fail_graphs, train_pass_graphs, test_fail_graphs = load_train_test_data(
+        args.data_path, 
+        device='cpu', 
+        verbose=args.verbose
+    )
     
-    if len(graphs) == 0:
-        print("\nError: No valid graphs loaded.")
-        print("Please run preprocessing first: python preprocess.py")
+    if len(train_fail_graphs) == 0:
+        print("\nError: No train fail graphs loaded.")
+        print("Please ensure processed_data/train/ contains fail graphs (.pt files with _fail in name)")
         return 1
     
-    # Split into train/test
-    print(f"\n[Splitting Data]")
-    random.seed(args.seed)
-    indices = list(range(len(graphs)))
-    random.shuffle(indices)
+    if len(test_fail_graphs) == 0:
+        print("\nError: No test fail graphs loaded.")
+        print("Please ensure processed_data/test/ contains fail graphs (.pt files with _fail in name)")
+        return 1
     
-    train_size = int(len(graphs) * args.train_ratio)
-    train_indices = indices[:train_size]
-    test_indices = indices[train_size:]
-    
-    train_graphs = [graphs[i] for i in train_indices]
-    test_graphs = [graphs[i] for i in test_indices]
-    
-    print(f"Total graphs: {len(graphs)}")
-    print(f"Train set: {len(train_graphs)} ({args.train_ratio*100:.0f}%)")
-    print(f"Test set: {len(test_graphs)} ({(1-args.train_ratio)*100:.0f}%)")
+    # Use pass graphs for training if available, otherwise fallback to fail graphs as negatives
+    if len(train_pass_graphs) == 0:
+        print("\nWarning: No train pass graphs found. Using train fail graphs as negatives for Phase 1.")
+        print("Consider preprocessing with both fail and pass logs for better contrastive learning.")
+        # Use fail graphs as negatives (different versions will serve as negatives)
+        train_pass_graphs = train_fail_graphs
+    else:
+        # Use all pass graphs from train folder for training
+        train_pass_graphs = train_pass_graphs
     
     # Train and evaluate
-    total_ranks, version_names = train_and_evaluate(train_graphs, test_graphs, args)
+    total_ranks, version_names = train_and_evaluate(
+        train_fail_graphs=train_fail_graphs,
+        train_pass_graphs=train_pass_graphs,
+        test_fail_graphs=test_fail_graphs,
+        args=args
+    )
     
     # Calculate metrics
     if len(total_ranks) == 0:
@@ -345,12 +427,12 @@ def main():
     result_json_path = output_path / f"falcon_results_{timestamp_str}.json"
     full_results = {
         'timestamp': start_time.isoformat(),
-        'train_ratio': args.train_ratio,
-        'seed': args.seed,
+        'data_source': 'train/test folders (pre-split)',
         'epochs1': args.epochs1,
         'epochs2': args.epochs2,
-        'train_size': len(train_graphs),
-        'test_size': len(test_graphs),
+        'train_fail_size': len(train_fail_graphs),
+        'train_pass_size': len(train_pass_graphs),
+        'test_fail_size': len(test_fail_graphs),
         'metrics': metrics,
         'ranks': list(zip(version_names, total_ranks))
     }
