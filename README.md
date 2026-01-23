@@ -84,23 +84,7 @@ pip install -r requirements.txt
 
 ### Step 1: Data Preprocessing
 
-**Option A: Python Script (Local)**
-
 ```bash
-cd data_preprocessing
-
-# Run preprocessing
-python preprocess.py
-
-# Options:
-python preprocess.py --force                        # Force rebuild
-python preprocess.py --versions v1-12896 v2-12893  # Specific versions
-```
-
-**Option B: Jupyter Notebook (Colab/Kaggle/Local)**
-
-```bash
-cd data_preprocessing
 jupyter notebook preprocess.ipynb
 
 # Or upload preprocess.ipynb to Google Colab / Kaggle
@@ -129,104 +113,8 @@ python training.py --seed 123             # Different seed
 
 ---
 
-### Quick Start (All Steps)
 
-```bash
-cd Falcon
-source venv/bin/activate
-
-# Step 1: Preprocess
-cd data_preprocessing
-python preprocess.py
-cd ..
-
-# Step 2: Train
-python training.py
-```
-
----
-
-## ☁️ Kaggle Training (Recommended for GPU)
-
-**Chạy training trên Kaggle với GPU T4 (free)** - Nhanh hơn và không tốn tài nguyên local!
-
-### Quick Setup
-
-1. **Upload code lên GitHub** (xem `KAGGLE_SETUP.md`)
-2. **Upload dataset lên Kaggle Datasets**
-3. **Tạo Kaggle Notebook** với GPU enabled
-4. **Run `kaggle_training.ipynb`**
-
-### Detailed Guide
-
-📖 **Xem hướng dẫn chi tiết**: [`KAGGLE_SETUP.md`](KAGGLE_SETUP.md)
-
-**Lợi ích**:
-- ✅ GPU T4 free (nhanh hơn CPU 10-20x)
-- ✅ Không tốn RAM local
-- ✅ Dễ share và reproduce
-- ✅ Auto-save results
-
-**Expected Runtime**: 20-45 phút (vs 2-4 giờ trên CPU)
-
----
-
-## 💻 CPU/GPU Support
-
-FALCON hỗ trợ **cả CPU và GPU** với khả năng **cross-platform**:
-
-### Device Detection
-
-Training tự động detect device:
-
-```bash
-# Auto-detect (recommended)
-python training.py
-
-# Force CPU
-python training.py --device cpu
-
-# Force GPU (if available)
-python training.py --device cuda
-```
-
-### Cross-Platform Workflow
-
-✅ **Preprocessing trên GPU (Kaggle) → Training trên CPU (Local)**
-```bash
-# Kaggle: Run preprocess.ipynb với T4 GPU
-# Download processed_data/ về local
-# MacBook: python training.py  # Auto-load với CPU
-```
-
-✅ **Preprocessing trên CPU → Training trên GPU**
-```bash
-# Local: cd data_preprocessing && python preprocess.py
-# Upload processed_data/ lên Colab/Kaggle
-# GPU: python training.py --device cuda
-```
-
-**Lý do hoạt động**: 
-- Preprocessing tạo files `.pt` portable (device-independent)
-- Training tự động chuyển đổi tensors với `map_location`
-
-📖 Xem thêm: `CPU_GPU_SUPPORT.md`
-
----
-
-## ⚙️ Configuration
-
-### Preprocessing Config
-
-Edit `data_preprocessing/config.py`:
-
-```python
-RAW_DATA_PATH = "../../data_tcpdump"
-OUTPUT_PATH = "../processed_data"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-```
-
-### Training Config
+## ⚙️ Configuration 
 
 Edit `src/config.py`:
 

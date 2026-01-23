@@ -1,8 +1,3 @@
-"""
-Adaptive Graph Augmentation (AGA) module for FALCON.
-Implements Transitive Analysis-based Adaptive Graph Augmentation (Section III.B.2).
-"""
-
 import torch
 import numpy as np
 from torch_geometric.data import Data
@@ -27,7 +22,7 @@ def identify_fault_related_subgraph(data: Data, faulty_node_indices: list) -> Se
     if len(faulty_node_indices) == 0:
         return set()
     
-    # Convert edge_index to NetworkX graph for easier path analysis
+    # Convert edge_index to NetworkX graph tìm đường đi
     edge_index = data.edge_index.cpu().numpy()
     num_nodes = data.num_nodes
     
@@ -68,8 +63,6 @@ def identify_fault_related_subgraph(data: Data, faulty_node_indices: list) -> Se
 def calculate_edge_centrality(data: Data) -> torch.Tensor:
     """
     Calculate edge centrality based on node degrees.
-    
-    Edge centrality is computed as the sum of degrees of the two endpoint nodes.
     Higher centrality means the edge connects more important nodes.
     
     Args:
@@ -86,108 +79,112 @@ def calculate_edge_centrality(data: Data) -> torch.Tensor:
     node_degree = degree(row, num_nodes) + degree(col, num_nodes)
     
     # Edge centrality = degree(src) + degree(dst)
-    edge_centrality = node_degree[row] + node_degree[col]
+    edge_centrality = node_degree[col]
     
     return edge_centrality
 
 
-def augment_graph(data: Data, drop_prob: float = 0.2, use_transitive: bool = True) -> Data:
+def augment_graph(data: Data, p_tau: float = 0.5, use_transitive: bool = True) -> Data:
     """
-    Apply Adaptive Graph Augmentation (AGA) to create G'_f.
+    Apply Adaptive Graph Augmentation (AGA) strictly following the paper.
     
-    According to Equation 1 in the paper:
-    p_drop(e) = drop_prob * (1 - centrality(e) / max_centrality) if e is fault-unrelated
-    
-    Args:
-        data: PyTorch Geometric Data object
-        drop_prob: Base dropping probability (alpha in the paper)
-        use_transitive: Whether to use transitive analysis to identify fault-related edges
-    
-    Returns:
-        Augmented Data object
+    Equation 1: p_uv = min( (w_max - w_uv)/(w_max - w_avg), p_tau )
     """
-    # Clone the data to avoid modifying the original
+    # Clone data
     augmented_data = data.clone()
-    
     edge_index = augmented_data.edge_index
     num_edges = edge_index.shape[1]
     
     if num_edges == 0:
         return augmented_data
     
-    # Identify faulty nodes (y=1)
+    # 1. Identify faulty nodes
     if hasattr(augmented_data, 'y') and augmented_data.y is not None:
         faulty_nodes = torch.where(augmented_data.y == 1)[0].tolist()
     else:
-        # If no labels, don't drop any edges
-        return augmented_data
+        return augmented_data # No labels, cannot augment
     
-    # Identify fault-related subgraph
+    # 2. Identify fault-related nodes (Vr)
     if use_transitive and len(faulty_nodes) > 0:
         fault_related_nodes = identify_fault_related_subgraph(augmented_data, faulty_nodes)
     else:
         fault_related_nodes = set(faulty_nodes)
     
-    # Calculate edge centrality
+    # 3. Calculate Edge Centrality (w_uv)
     edge_centrality = calculate_edge_centrality(augmented_data)
     
-    # Normalize centrality to [0, 1]
-    max_centrality = edge_centrality.max()
-    if max_centrality > 0:
-        normalized_centrality = edge_centrality / max_centrality
-    else:
-        normalized_centrality = torch.zeros_like(edge_centrality)
+    # 4. Calculate Removal Probabilities (p_uv) according to Eq 1
+    w_max = edge_centrality.max()
+    w_avg = edge_centrality.mean()
     
-    # Determine which edges to keep
+    # Tránh chia cho 0 nếu w_max = w_avg
+    if w_max - w_avg == 0:
+        # Nếu tất cả cạnh có centrality bằng nhau, xác suất xóa bằng 0
+        p_uv_all = torch.zeros_like(edge_centrality)
+    else:
+        # Phần trong ngoặc: (w_max - w_uv) / (w_max - w_avg)
+        term = (w_max - edge_centrality) / (w_max - w_avg)
+        
+        # Áp dụng hàm min(..., p_tau)
+        p_uv_all = torch.clamp(term, max=p_tau)
+        
+        # Cần đảm bảo p_uv không âm (xác suất >= 0)
+        p_uv_all = torch.clamp(p_uv_all, min=0.0)
+
+    # 5. Drop Edges
     edges_to_keep = []
+    
+    # Chuyển p_uv sang numpy hoặc list để truy xuất nhanh trong loop
+    p_uv_list = p_uv_all.tolist()
     
     for i in range(num_edges):
         src, dst = edge_index[0, i].item(), edge_index[1, i].item()
         
-        # Check if edge is fault-related
+        # Check Fault-related
         is_fault_related = (src in fault_related_nodes) or (dst in fault_related_nodes)
         
         if is_fault_related:
-            # Always keep fault-related edges
+            # Luôn giữ lại cạnh liên quan lỗi
             edges_to_keep.append(i)
         else:
-            # Apply adaptive dropping for fault-unrelated edges
-            # p_drop = drop_prob * (1 - centrality)
-            centrality = normalized_centrality[i].item()
-            p_drop = drop_prob * (1 - centrality)
+            # Fault-unrelated: Xóa dựa trên xác suất p_uv
+            prob_drop = p_uv_list[i]
             
-            # Keep edge with probability (1 - p_drop)
-            if np.random.random() > p_drop:
+            # Sinh số ngẫu nhiên r [0, 1]
+            # Nếu r < prob_drop thì XÓA. 
+            # (Hoặc r >= prob_drop thì GIỮ)
+            r = np.random.random()
+            
+            if r >= prob_drop: 
                 edges_to_keep.append(i)
     
-    # Update edge_index
+    # Update graph
     if len(edges_to_keep) > 0:
         augmented_data.edge_index = edge_index[:, edges_to_keep]
     else:
-        # Keep at least some edges to avoid empty graph
-        augmented_data.edge_index = edge_index
+        augmented_data.edge_index = edge_index # Fallback
     
     return augmented_data
 
 
-def augment_graph_pair(data: Data, drop_prob: float = 0.2) -> Tuple[Data, Data]:
+def augment_graph_pair(data: Data, p_tau: float = 0.2) -> Tuple[Data, Data]:
     """
     Create two augmented views of the same graph for contrastive learning.
     
     Args:
         data: PyTorch Geometric Data object
-        drop_prob: Base dropping probability
-    
+        p_tau: Base dropping probability
+
     Returns:
         Tuple of two augmented Data objects (G'_f1, G'_f2)
     """
-    view1 = augment_graph(data, drop_prob=drop_prob, use_transitive=True)
-    view2 = augment_graph(data, drop_prob=drop_prob, use_transitive=True)
+    view1 = augment_graph(data, p_tau=p_tau, use_transitive=True)
+    view2 = augment_graph(data, p_tau=p_tau, use_transitive=True)
     
     return view1, view2
 
 
-def batch_augment_graphs(data_list: list, drop_prob: float = 0.2) -> list:
+def batch_augment_graphs(data_list: list, p_tau: float = 0.2) -> list:
     """
     Apply augmentation to a batch of graphs.
     
@@ -201,43 +198,8 @@ def batch_augment_graphs(data_list: list, drop_prob: float = 0.2) -> list:
     augmented_list = []
     
     for data in data_list:
-        augmented = augment_graph(data, drop_prob=drop_prob)
+        augmented = augment_graph(data, p_tau=p_tau)
         augmented_list.append(augmented)
     
     return augmented_list
-
-
-if __name__ == "__main__":
-    # Test the augmentation module
-    print("Testing Adaptive Graph Augmentation...")
-    
-    # Create a simple test graph
-    edge_index = torch.tensor([
-        [0, 1, 1, 2, 2, 3, 3, 4],
-        [1, 0, 2, 1, 3, 2, 4, 3]
-    ], dtype=torch.long)
-    
-    x = torch.randn(5, 16)  # 5 nodes, 16 features
-    y = torch.tensor([0, 0, 1, 0, 0], dtype=torch.long)  # Node 2 is faulty
-    
-    data = Data(x=x, edge_index=edge_index, y=y)
-    
-    print(f"Original graph: {data.num_nodes} nodes, {data.num_edges} edges")
-    
-    # Test fault-related subgraph identification
-    faulty_nodes = [2]
-    fault_related = identify_fault_related_subgraph(data, faulty_nodes)
-    print(f"Fault-related nodes: {fault_related}")
-    
-    # Test edge centrality
-    centrality = calculate_edge_centrality(data)
-    print(f"Edge centrality: {centrality}")
-    
-    # Test augmentation
-    augmented = augment_graph(data, drop_prob=0.3)
-    print(f"Augmented graph: {augmented.num_nodes} nodes, {augmented.num_edges} edges")
-    
-    # Test pair augmentation
-    view1, view2 = augment_graph_pair(data, drop_prob=0.3)
-    print(f"View 1: {view1.num_edges} edges, View 2: {view2.num_edges} edges")
 
