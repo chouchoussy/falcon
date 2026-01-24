@@ -177,7 +177,7 @@ class FALCONTrainer:
                 g_p = pass_graphs[i % len(pass_graphs)]  # Keep on CPU
                 
                 # Create augmented fail graph (on CPU)
-                g_f_aug = self.augment_fn(g_f, drop_prob=drop_prob)
+                g_f_aug = self.augment_fn(g_f, p_tau=drop_prob)
                 
                 optimizer.zero_grad()
                 
@@ -546,74 +546,3 @@ class FALCONTrainer:
             self.history = checkpoint['history']
         
         return checkpoint
-
-
-if __name__ == "__main__":
-    # Test the trainer
-    print("Testing FALCON Trainer...")
-    
-    from ..models import FALCONModel
-    from ..dataset import augment_graph
-    
-    # Create dummy model
-    model = FALCONModel(
-        input_dim=384,
-        hidden_dim=128,
-        embedding_dim=64
-    )
-    
-    print(f"Model parameters: {model.get_num_params():,}")
-    
-    # Create dummy data
-    num_graphs = 5
-    fail_graphs = []
-    pass_graphs = []
-    
-    for i in range(num_graphs):
-        num_nodes = 30
-        x = torch.randn(num_nodes, 384)
-        edge_index = torch.randint(0, num_nodes, (2, 50))
-        y = torch.zeros(num_nodes, dtype=torch.long)
-        y[[5, 10]] = 1  # 2 faulty nodes
-        
-        fail_graphs.append(Data(x=x, edge_index=edge_index, y=y))
-        pass_graphs.append(Data(x=x, edge_index=edge_index))
-    
-    print(f"\nCreated {len(fail_graphs)} fail graphs and {len(pass_graphs)} pass graphs")
-    
-    # Create trainer
-    trainer = FALCONTrainer(
-        model=model,
-        device='cpu',
-        augment_fn=augment_graph
-    )
-    
-    print("\n--- Testing Phase 1 ---")
-    history_p1 = trainer.train_phase1_representation(
-        fail_graphs=fail_graphs,
-        pass_graphs=pass_graphs,
-        epochs=2,
-        verbose=True
-    )
-    
-    print("\n--- Testing Phase 2 ---")
-    history_p2 = trainer.train_phase2_ranking(
-        fail_graphs=fail_graphs,
-        epochs=2,
-        verbose=True
-    )
-    
-    print("\n--- Testing Prediction ---")
-    test_graph = fail_graphs[0]
-    scores = trainer.predict(test_graph)
-    print(f"Predicted scores shape: {scores.shape}")
-    
-    top_indices, top_scores = trainer.predict(test_graph, return_top_k=5)
-    print(f"Top-5 nodes: {top_indices.tolist()}")
-    print(f"Top-5 scores: {[f'{s:.4f}' for s in top_scores.tolist()]}")
-    
-    print("\n--- Testing Evaluation ---")
-    results = trainer.evaluate(fail_graphs, verbose=True)
-    
-    print("\n✓ All trainer tests passed!")
-
