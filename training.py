@@ -117,6 +117,13 @@ def load_graphs_from_folder(folder_path: Path, device: str = 'cpu', verbose: boo
             # PyTorch 2.6+ requires weights_only=False for custom objects
             data = torch.load(pt_file, map_location=device, weights_only=False)
             
+            # Extract version_id from filename (e.g. "v1-12896_fail_0" -> "v1")
+            filename_stem = pt_file.stem
+            if '-' in filename_stem:
+                data.version_id = filename_stem.split('-', 1)[0]
+            else:
+                data.version_id = "unknown"
+            
             # Store version name if not present
             if not hasattr(data, 'version_name'):
                 data.version_name = pt_file.stem
