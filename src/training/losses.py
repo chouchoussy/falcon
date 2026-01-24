@@ -15,14 +15,6 @@ class NodeContrastiveLoss(nn.Module):
     Node-level Contrastive Loss (Equation 3 in paper).
     
     InfoNCE loss between nodes of original graph (G_f) and augmented graph (G'_f).
-    Maximizes agreement between corresponding nodes in different views.
-    
-    Formula:
-        L_node = -log( exp(sim(z_i, z'_i) / τ) / Σ_k exp(sim(z_i, z'_k) / τ) )
-    
-    where z_i and z'_i are projected embeddings of node i in two views.
-    
-    Memory-optimized: Uses chunked computation to avoid OOM for large graphs.
     """
     
     def __init__(self, temperature: float = 0.07, chunk_size: int = 5000, max_nodes: int = 50000):
@@ -45,17 +37,7 @@ class NodeContrastiveLoss(nn.Module):
         z2: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Compute node-level contrastive loss (memory-optimized).
         
-        Args:
-            z1: Projected embeddings from view 1 [num_nodes, embed_dim]
-            z2: Projected embeddings from view 2 [num_nodes, embed_dim]
-            mask: Optional mask for valid nodes [num_nodes] (True = valid)
-        
-        Returns:
-            Scalar loss value
-        """
         # Ensure embeddings are L2-normalized
         z1 = F.normalize(z1, p=2, dim=-1)
         z2 = F.normalize(z2, p=2, dim=-1)
@@ -78,25 +60,47 @@ class NodeContrastiveLoss(nn.Module):
             z2 = z2[indices]
             num_nodes = self.max_nodes
         
-        # Memory-efficient computation: process in chunks
-        # Instead of creating full [N, N] matrix, compute loss row by row
         losses = []
         
         for i in range(0, num_nodes, self.chunk_size):
             end_idx = min(i + self.chunk_size, num_nodes)
             z1_chunk = z1[i:end_idx]  # [chunk_size, embed_dim]
-            z2_chunk = z2[i:end_idx]  # [chunk_size, embed_dim] - corresponding nodes
+            z2_chunk = z2[i:end_idx]  # [chunk_size, embed_dim] 
+
+            # 1. Tử số (Positive pair): z1_i vs z2_i
+            pos_sim = (z1_chunk * z2_chunk).sum(dim=1) / self.temperature
+
+            # 2. Mẫu số phần 1 (Inter-view negatives): z1_i vs tất cả z2_k
+            sim_z1_z2 = torch.matmul(z1_chunk, z2.t()) / self.temperature
             
-            # Compute similarities for this chunk: [chunk_size, num_nodes]
-            # Need full similarities for logsumexp
-            similarities = torch.matmul(z1_chunk, z2.t()) / self.temperature
+            # 3. Mẫu số phần 2 (Intra-view negatives): z1_i vs tất cả z1_k (với k != i)
+            sim_z1_z1 = torch.matmul(z1_chunk, z1.t()) / self.temperature
             
-            # Positive pairs are diagonal elements (z1[i] with z2[i])
-            # Get positive similarity: dot product of corresponding nodes
-            positives = (z1_chunk * z2_chunk).sum(dim=1) / self.temperature
+            # Cần loại bỏ z1_i vs z1_i (k=i) ra khỏi mẫu số phần 2
+            # Tạo mask cho chunk hiện tại
+            # Mask có kích thước [chunk_size, num_nodes]
+            # Giá trị 1 ở vị trí diagonal tương ứng
+            diag_mask = torch.zeros_like(sim_z1_z1, dtype=torch.bool)
             
-            # Log-sum-exp for each row
-            chunk_losses = -positives + torch.logsumexp(similarities, dim=1)
+            # Điền True vào đường chéo tương ứng với chunk này
+            # Các node từ i đến end_idx trong batch lớn tương ứng với cột i đến end_idx
+            chunk_indices = torch.arange(end_idx - i, device=z1.device)
+            global_indices = torch.arange(i, end_idx, device=z1.device)
+            diag_mask[chunk_indices, global_indices] = True
+            
+            # Gán giá trị cực nhỏ (-inf) cho vị trí chính nó để exp(-inf) = 0
+            sim_z1_z1.masked_fill_(diag_mask, -float('inf'))
+            
+            # 4. Gom tất cả lại vào mẫu số (LogSumExp)
+            # Mẫu số = exp(sim_z1_z2) + exp(sim_z1_z1_no_diag)
+            # Để dùng logsumexp ổn định số học, ta nối 2 ma trận lại
+            # combined_sim: [chunk_size, 2 * num_nodes]
+            combined_sim = torch.cat([sim_z1_z2, sim_z1_z1], dim=1)
+            
+            # L_i = - log( exp(pos) / sum(exp(all)) )
+            #     = - pos + log(sum(exp(all)))
+            chunk_losses = -pos_sim + torch.logsumexp(combined_sim, dim=1)
+
             losses.append(chunk_losses)
         
         # Concatenate and average
@@ -114,7 +118,6 @@ class GraphContrastiveLoss(nn.Module):
     - Positive: Original fail graph (G_f)
     - Negative: Pass graph (G_p)
     
-    Ensures fail graphs are closer to each other than to pass graphs.
     """
     
     def __init__(self, margin: float = 1.0, distance: str = 'cosine'):
@@ -123,7 +126,7 @@ class GraphContrastiveLoss(nn.Module):
         
         Args:
             margin: Margin for triplet loss
-            distance: Distance metric ('cosine' or 'euclidean')
+            distance: Euclidean distance (L2 norm squared).
         """
         super(GraphContrastiveLoss, self).__init__()
         self.margin = margin
@@ -137,7 +140,10 @@ class GraphContrastiveLoss(nn.Module):
             x2_norm = F.normalize(x2, p=2, dim=-1)
             return 1 - (x1_norm * x2_norm).sum(dim=-1)
         elif self.distance == 'euclidean':
-            return F.pairwise_distance(x1, x2, p=2)
+            # Paper uses Squared L2 Norm: ||x1 - x2||_2^2
+            # F.pairwise_distance returns L2 norm (without square)
+            dist = F.pairwise_distance(x1, x2, p=2)
+            return dist.pow(2)  # SQUARED L2
         else:
             raise ValueError(f"Unknown distance: {self.distance}")
     
@@ -147,17 +153,7 @@ class GraphContrastiveLoss(nn.Module):
         positive: torch.Tensor,
         negative: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Compute graph-level triplet loss.
-        
-        Args:
-            anchor: Embeddings of augmented fail graphs [batch_size, embed_dim]
-            positive: Embeddings of original fail graphs [batch_size, embed_dim]
-            negative: Embeddings of pass graphs [batch_size, embed_dim]
-        
-        Returns:
-            Scalar loss value
-        """
+
         # Distance between anchor and positive (should be small)
         d_ap = self._compute_distance(anchor, positive)
         

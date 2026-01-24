@@ -3,6 +3,7 @@ Trainer module for FALCON.
 Implements two-phase training: representation learning + fault localization.
 """
 
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -131,7 +132,7 @@ class FALCONTrainer:
             fail_graphs: List of failed test graphs (G_f)
             pass_graphs: List of passed test graphs (G_p)
             epochs: Number of training epochs
-            batch_size: Batch size (not implemented for simplicity, processes one by one)
+            batch_size: Number of graphs to accumulate gradients before update (Gradient Accumulation)
             drop_prob: Dropout probability for augmentation
             verbose: Whether to print progress
         
@@ -145,8 +146,21 @@ class FALCONTrainer:
             print(f"Fail graphs: {len(fail_graphs)}")
             print(f"Pass graphs: {len(pass_graphs)}")
             print(f"Epochs: {epochs}")
+            print(f"Batch Size (Accumulation Steps): {batch_size}")
             print(f"Learning rate: {self.learning_rate_phase1}")
         
+        # Pre-process: Organize pass graphs by version for O(1) lookup
+        pass_graphs_by_version = {}
+        for g in pass_graphs:
+            vid = getattr(g, 'version_id', None)
+            if vid is not None:
+                if vid not in pass_graphs_by_version:
+                    pass_graphs_by_version[vid] = []
+                pass_graphs_by_version[vid].append(g)
+        
+        if verbose:
+            print(f"Organized pass graphs into {len(pass_graphs_by_version)} versions for Version-Aware Pairing.")
+
         # Setup optimizer for Phase 1 (Encoder + ProjectionHead)
         optimizer = optim.Adam(
             list(self.model.encoder.parameters()) + 
@@ -156,11 +170,16 @@ class FALCONTrainer:
         )
         
         self.model.train()
+        optimizer.zero_grad()  # Initialize gradients
         
         # Check if augmentation function is available
         if self.augment_fn is None:
-            print("Warning: No augmentation function provided. Using identity.")
-            from ..dataset import augment_graph
+            # Use relative import if possible, or try to import from src.training.augmentation
+            try:
+                from .augmentation import augment_graph
+            except ImportError:
+                # If running from different context
+                from src.training.augmentation import augment_graph
             self.augment_fn = augment_graph
         
         for epoch in range(epochs):
@@ -172,14 +191,25 @@ class FALCONTrainer:
             iterator = tqdm(range(len(fail_graphs)), desc=f"Epoch {epoch+1}/{epochs}") if verbose else range(len(fail_graphs))
             
             for i in iterator:
-                # Get a fail graph and a pass graph (keep on CPU, move to GPU only when needed)
+                # Get a fail graph (keep on CPU, move to GPU only when needed)
                 g_f = fail_graphs[i]  # Keep on CPU
-                g_p = pass_graphs[i % len(pass_graphs)]  # Keep on CPU
+                
+                # Version-Aware Random Pairing
+                vid = getattr(g_f, 'version_id', None)
+                if vid in pass_graphs_by_version and pass_graphs_by_version[vid]:
+                    g_p = random.choice(pass_graphs_by_version[vid])
+                else:
+                    if verbose:
+                         msg = f"Warning: No matching pass graph for fail graph index {i} (Version: {vid}). Skipping."
+                         if isinstance(iterator, tqdm): iterator.write(msg)
+                         else: print(msg)
+                    continue
                 
                 # Create augmented fail graph (on CPU)
+                # FIX: augment_graph expects 'p_tau' instead of 'drop_prob'
                 g_f_aug = self.augment_fn(g_f, p_tau=drop_prob)
                 
-                optimizer.zero_grad()
+                # optimizer.zero_grad() has been moved to handle accumulation steps
                 
                 # Process each graph separately with explicit cleanup
                 # Forward pass for fail graph
@@ -225,12 +255,13 @@ class FALCONTrainer:
                     torch.cuda.empty_cache()
                 
                 # Compute combined loss
-                # Node embeddings should have same size (use min size if different)
-                min_nodes = min(proj_emb_f.shape[0], proj_emb_f_aug.shape[0])
+                if g_f.num_nodes != g_f_aug.num_nodes:
+                    print(f"CRITICAL ERROR: Node mismatch! Original: {g_f.num_nodes}, Aug: {g_f_aug.num_nodes}. Skipping.")
+                    continue
                 
                 total_loss, node_loss, graph_loss = self.combined_loss(
-                    proj_emb_f[:min_nodes],
-                    proj_emb_f_aug[:min_nodes],
+                    proj_emb_f,
+                    proj_emb_f_aug,
                     graph_emb_f,
                     graph_emb_f_aug,
                     graph_emb_p
@@ -241,9 +272,13 @@ class FALCONTrainer:
                 node_loss_val = node_loss.item()
                 graph_loss_val = graph_loss.item()
                 
-                # Backward and optimize
-                total_loss.backward()
-                optimizer.step()
+                # Backward and optimize with Gradient Accumulation
+                # Normalize loss by accumulation steps (batch_size)
+                (total_loss / batch_size).backward()
+                
+                if (i + 1) % batch_size == 0 or (i + 1) == len(fail_graphs):
+                    optimizer.step()
+                    optimizer.zero_grad()
                 
                 # Delete all remaining GPU tensors
                 del node_emb_f, node_emb_f_aug, node_emb_p
@@ -310,7 +345,7 @@ class FALCONTrainer:
         Args:
             fail_graphs: List of failed test graphs with labels (y)
             epochs: Number of training epochs
-            batch_size: Batch size (not implemented for simplicity)
+            batch_size: Number of graphs to accumulate gradients before update
             verbose: Whether to print progress
         
         Returns:
@@ -322,6 +357,7 @@ class FALCONTrainer:
             print("=" * 70)
             print(f"Fail graphs: {len(fail_graphs)}")
             print(f"Epochs: {epochs}")
+            print(f"Batch Size (Accumulation Steps): {batch_size}")
             print(f"Learning rate: {self.learning_rate_phase2}")
             print(f"Freeze encoder: {self.freeze_encoder_phase2}")
         
@@ -347,18 +383,19 @@ class FALCONTrainer:
             )
         
         self.model.train()
+        optimizer.zero_grad()  # Initialize gradients
         
         for epoch in range(epochs):
             epoch_losses = []
             
             iterator = tqdm(fail_graphs, desc=f"Epoch {epoch+1}/{epochs}") if verbose else fail_graphs
             
-            for g_f in iterator:
+            for i, g_f in enumerate(iterator):
                 # Keep graph on CPU, move to GPU only when needed
                 if not hasattr(g_f, 'y') or g_f.y is None:
                     continue
                 
-                optimizer.zero_grad()
+                # optimizer.zero_grad() moved to handle accumulation
                 
                 # Move to GPU only for forward pass
                 g_f_gpu = g_f.to(self.device)
@@ -378,9 +415,15 @@ class FALCONTrainer:
                 loss_val = loss.item() if loss.item() > 0 else None
                 
                 if loss_val is not None and loss_val > 0:  # Only backprop if loss is valid
-                    loss.backward()
-                    optimizer.step()
+                    # Normalize loss by batch_size for Gradient Accumulation
+                    (loss / batch_size).backward()
                     epoch_losses.append(loss_val)
+                
+                # Update weights every batch_size iterations
+                # Check for update regardless of whether THIS sample contributed valid loss
+                if (i + 1) % batch_size == 0 or (i + 1) == len(fail_graphs):
+                    optimizer.step()
+                    optimizer.zero_grad()
                 
                 # Delete all GPU tensors (graph is already on CPU, this is just GPU copy)
                 del g_f_gpu, outputs, rank_scores, loss
