@@ -44,7 +44,7 @@ DROPOUT = 0.1
 # ============================================================================
 
 # Phase 1: Representation Learning
-PHASE1_EPOCHS = 10
+PHASE1_EPOCHS = 100
 LEARNING_RATE_PHASE1 = 1e-3
 NODE_LOSS_WEIGHT = 1.0
 GRAPH_LOSS_WEIGHT = 0.5
