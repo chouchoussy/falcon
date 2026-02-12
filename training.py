@@ -4,12 +4,14 @@ FALCON Training Script.
 Trains the model using preprocessed graphs from processed_data/.
 
 Usage:
-    python training.py                        # Load from processed_data/train/ and processed_data/test/
-    python training.py --epochs1 5 --epochs2 5  # Custom epochs
-    python training.py --data_path ./custom_data  # Custom data path
+    python training.py                                          # Load from processed_data/train/ and processed_data/test/
+    python training.py --epochs1 5 --epochs2 5                  # Custom epochs
+    python training.py --data_path ./custom_data                # Custom data path (auto-detect train/test folders)
+    python training.py --train_path ./train --test_path ./test  # Direct paths to train and test folders
     
 Note: Data is loaded directly from train/ and test/ folders.
       No automatic train/test splitting is performed.
+      If --train_path and --test_path are provided, they take precedence over --data_path.
 """
 
 import sys
@@ -43,7 +45,19 @@ def parse_args():
         '--data_path',
         type=str,
         default=config.PROCESSED_PATH,
-        help='Path to preprocessed data (.pt files)'
+        help='Path to preprocessed data (containing train/ and test/ subfolders). Ignored if --train_path and --test_path are provided.'
+    )
+    parser.add_argument(
+        '--train_path',
+        type=str,
+        default=None,
+        help='Direct path to train folder containing .pt files. If provided with --test_path, --data_path is ignored.'
+    )
+    parser.add_argument(
+        '--test_path',
+        type=str,
+        default=None,
+        help='Direct path to test folder containing .pt files. If provided with --train_path, --data_path is ignored.'
     )
     parser.add_argument(
         '--output_path',
@@ -162,32 +176,65 @@ def load_graphs_from_folder(folder_path: Path, device: str = 'cpu', verbose: boo
     return fail_graphs, pass_graphs
 
 
-def load_train_test_data(data_path: str, device: str = 'cpu', verbose: bool = True) -> Tuple[List[Data], List[Data], List[Data]]:
+def load_train_test_data(
+    data_path: str = None, 
+    train_path: str = None, 
+    test_path: str = None, 
+    device: str = 'cpu', 
+    verbose: bool = True
+) -> Tuple[List[Data], List[Data], List[Data]]:
     """
     Load preprocessed graphs from train/ and test/ folders.
     
     Args:
-        data_path: Path to directory containing train/ and test/ folders
+        data_path: Path to directory containing train/ and test/ folders (used if train_path/test_path not provided)
+        train_path: Direct path to train folder containing .pt files (takes precedence over data_path)
+        test_path: Direct path to test folder containing .pt files (takes precedence over data_path)
         device: Device to load tensors to ('cuda' or 'cpu')
         verbose: Whether to print progress
     
     Returns:
         Tuple of (train_fail_graphs, train_pass_graphs, test_fail_graphs)
     """
-    data_dir = Path(data_path)
+    # Determine train and test directories
+    if train_path and test_path:
+        # Use direct paths if provided
+        train_dir = Path(train_path)
+        test_dir = Path(test_path)
+        if verbose:
+            print(f"Using direct paths:")
+            print(f"  Train path: {train_dir}")
+            print(f"  Test path: {test_dir}")
+    else:
+        # Fall back to data_path with train/ and test/ subfolders
+        if data_path is None:
+            print("Error: Either data_path or both train_path and test_path must be provided")
+            return [], [], []
+        
+        data_dir = Path(data_path)
+        
+        if not data_dir.exists():
+            print(f"Error: Data directory not found: {data_dir}")
+            print("Please run preprocessing first: python preprocess.py")
+            return [], [], []
+        
+        train_dir = data_dir / 'train'
+        test_dir = data_dir / 'test'
+        
+        if verbose:
+            print(f"Using data_path with auto-detected subfolders:")
+            print(f"  Data directory: {data_dir}")
+            print(f"  Train directory: {train_dir}")
+            print(f"  Test directory: {test_dir}")
     
-    if not data_dir.exists():
-        print(f"Error: Data directory not found: {data_dir}")
-        print("Please run preprocessing first: python preprocess.py")
+    # Validate directories exist
+    if not train_dir.exists():
+        print(f"Error: Train directory not found: {train_dir}")
         return [], [], []
     
-    train_dir = data_dir / 'train'
-    test_dir = data_dir / 'test'
-    
-    if verbose:
-        print(f"Data directory: {data_dir}")
-        print(f"Train directory: {train_dir}")
-        print(f"Test directory: {test_dir}")
+    if not test_dir.exists():
+        print(f"Error: Test directory not found: {test_dir}")
+        return [], [], []
     
     # Load from train folder
     if verbose:
@@ -359,11 +406,17 @@ def main():
     
     start_time = datetime.now()
     
+    # Determine data source description for logging
+    if args.train_path and args.test_path:
+        data_source = f"Direct paths (train: {args.train_path}, test: {args.test_path})"
+    else:
+        data_source = f"{args.data_path} (auto-detect train/test)"
+    
     print("\n" + "=" * 70)
     print("FALCON TRAINING")
     print("=" * 70)
     print(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Data Path: {args.data_path}")
+    print(f"Data Source: {data_source}")
     print(f"Device: {args.device}")
     print(f"Phase 1 Epochs: {args.epochs1}")
     print(f"Phase 2 Epochs: {args.epochs2}")
@@ -374,21 +427,25 @@ def main():
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Load preprocessed graphs from train/ and test/ folders (always on CPU to save GPU memory)
-    print("\n[Loading Preprocessed Graphs from train/ and test/ folders]")
+    print("\n[Loading Preprocessed Graphs]")
     train_fail_graphs, train_pass_graphs, test_fail_graphs = load_train_test_data(
-        args.data_path, 
+        data_path=args.data_path,
+        train_path=args.train_path,
+        test_path=args.test_path,
         device='cpu', 
         verbose=args.verbose
     )
     
     if len(train_fail_graphs) == 0:
         print("\nError: No train fail graphs loaded.")
-        print("Please ensure processed_data/train/ contains fail graphs (.pt files with _fail in name)")
+        print("Please ensure your train folder contains fail graphs (.pt files with _fail in name)")
+        print("Use --train_path to specify the train folder directly, or --data_path for auto-detection.")
         return 1
     
     if len(test_fail_graphs) == 0:
         print("\nError: No test fail graphs loaded.")
-        print("Please ensure processed_data/test/ contains fail graphs (.pt files with _fail in name)")
+        print("Please ensure your test folder contains fail graphs (.pt files with _fail in name)")
+        print("Use --test_path to specify the test folder directly, or --data_path for auto-detection.")
         return 1
     
     # Use pass graphs for training if available, otherwise fallback to fail graphs as negatives
@@ -438,7 +495,10 @@ def main():
     result_json_path = output_path / f"falcon_results_{timestamp_str}.json"
     full_results = {
         'timestamp': start_time.isoformat(),
-        'data_source': 'train/test folders (pre-split)',
+        'data_source': data_source,
+        'train_path': args.train_path,
+        'test_path': args.test_path,
+        'data_path': args.data_path,
         'epochs1': args.epochs1,
         'epochs2': args.epochs2,
         'train_fail_size': len(train_fail_graphs),

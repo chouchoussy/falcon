@@ -42,6 +42,7 @@ logs/
 *.pt
 *.pth
 *.csv
+raw_data/
 
 # Jupyter
 .ipynb_checkpoints/
